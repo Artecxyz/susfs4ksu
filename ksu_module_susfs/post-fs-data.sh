@@ -97,11 +97,7 @@ ${SUSFS_BIN} add_sus_kstat_statically '/proc/fs/jbd2' 'default' 'default' '2' 'd
 EOF
 
 #### Enable avc log spoofing to bypass 'su' domain detection via /proc/<pid> enumeration, effective for all processes ####
-cat <<EOF >/dev/null
-ksu_susfs enable_avc_log_spoofing 1
-## disable it when users want to do some debugging with the permission issue or selinux issue ##
-#ksu_susfs enable_avc_log_spoofing 0
-EOF
+${SUSFS_BIN} enable_avc_log_spoofing 1
 
 #### Hide all sus mounts for NON-SU processes in this stage just to prevent zygote from caching them in memory ####
 ## This should be mainly applied if you have ReZygisk enabled but without TreatWheel module ##
