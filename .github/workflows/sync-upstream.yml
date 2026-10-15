@@ -1,0 +1,145 @@
+name: sync-upstream
+
+# Sync gki-android15-6.6 with gitlab.com/simonpunk/susfs4ksu (the upstream the
+# tracking branch was imported from)
+
+on:
+  schedule:
+    - cron: '30 17 * * *'   # daily 01:30 UTC+8, before the kernel-side syncs
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: susfs4ksu-sync
+  cancel-in-progress: false
+
+env:
+  TRACKING: gki-android15-6.6
+  BRANCH: gki-android15-6.6
+  UPSTREAM_URL: https://gitlab.com/simonpunk/susfs4ksu.git
+  UPSTREAM_BRANCH: gki-android15-6.6
+  ISSUE_TITLE: "[auto-sync] susfs4ksu upstream merge conflict - manual resolution needed"
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout branch (full history)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BRANCH }}
+          fetch-depth: 0
+
+      - name: Git identity
+        run: |
+          git config user.name  "Artecxyz"
+          git config user.email "artecxyz404@gmail.com"
+
+      - name: Fetch upstream and tracking branch
+        run: |
+          git fetch origin "$TRACKING"
+          git remote add upstream "$UPSTREAM_URL"
+          git fetch --no-tags upstream "$UPSTREAM_BRANCH:refs/remotes/upstream/$UPSTREAM_BRANCH"
+          echo "upstream tip: $(git rev-parse "refs/remotes/upstream/$UPSTREAM_BRANCH")"
+
+      - name: Sync tracking branch
+        id: tracking
+        run: |
+          set -euo pipefail
+          UP_REF="refs/remotes/upstream/$UPSTREAM_BRANCH"
+          UP_SHA=$(git rev-parse --short=12 "$UP_REF")
+          UP_FULL=$(git rev-parse "$UP_REF")
+          echo "up_sha=$UP_SHA" >> "$GITHUB_OUTPUT"
+          CUR=$(git rev-parse "origin/$TRACKING")
+          if [ "$CUR" = "$UP_FULL" ]; then
+            echo "tracking branch already == upstream tip - nothing to sync"
+            exit 0
+          fi
+          if git merge-base --is-ancestor "origin/$TRACKING" "$UP_REF"; then
+            git push origin "$UP_FULL:refs/heads/$TRACKING"
+            echo "tracking synced: fast-forward to $UP_SHA"
+          else
+            echo "tracking branch diverged from upstream - trying a merge"
+            git checkout -B "$TRACKING" "origin/$TRACKING"
+            if ! git merge --no-edit -m "Merge branch '$UPSTREAM_BRANCH' of https://gitlab.com/simonpunk/susfs4ksu into $TRACKING" "$UP_REF" >/tmp/tracking-merge.log 2>&1; then
+              git merge --abort || true
+              cp /tmp/tracking-merge.log "$RUNNER_TEMP/conflict.log" || true
+              echo "has_conflict=true" >> "$GITHUB_OUTPUT"
+              echo "::error::tracking-branch merge conflict - aborted, nothing pushed"
+              exit 1
+            fi
+            git push origin "$TRACKING"
+            echo "tracking synced: merge commit on top of $UP_SHA"
+          fi
+          echo "tracking_synced=true" >> "$GITHUB_OUTPUT"
+
+      - name: Merge tracking into branch
+        id: merge
+        run: |
+          set -euo pipefail
+          git fetch origin "$TRACKING"
+          git checkout -B "$BRANCH" "origin/$BRANCH"
+          if git merge-base --is-ancestor "refs/remotes/origin/$TRACKING" "$BRANCH"; then
+            echo "branch already contains the tracking tip - nothing to merge"
+            {
+              echo "### susfs4ksu upstream sync"
+              echo "- upstream tip: \`$UPSTREAM_BRANCH @ ${{ steps.tracking.outputs.up_sha }}\`"
+              echo "- tracking synced: ${{ steps.tracking.outputs.tracking_synced == 'true' }}"
+              echo "- merge: nothing to do"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git merge --no-ff --no-commit "refs/remotes/origin/$TRACKING" > /tmp/merge.log 2>&1 || true
+          CONFLICTS=$(git diff --name-only --diff-filter=U || true)
+          if [ -n "$CONFLICTS" ]; then
+            printf '%s\n' "$CONFLICTS" > /tmp/conflict-files.txt
+            git merge --abort
+            echo "has_conflict=true" >> "$GITHUB_OUTPUT"
+            echo "::error::$(printf '%s\n' "$CONFLICTS" | wc -l) conflicting files - merge aborted, nothing pushed"
+            exit 1
+          fi
+          if ! git rev-parse -q --verify MERGE_HEAD >/dev/null; then
+            echo "::error::git merge failed without producing conflicts:"
+            cat /tmp/merge.log
+            exit 1
+          fi
+          UP_SHA=$(git rev-parse --short=12 "refs/remotes/upstream/$UPSTREAM_BRANCH")
+          git commit -m "Merge branch '$TRACKING' of https://gitlab.com/simonpunk/susfs4ksu into $BRANCH"
+          git push origin "$BRANCH"
+          {
+            echo "### susfs4ksu upstream sync"
+            echo "- upstream tip: \`$UPSTREAM_BRANCH @ $UP_SHA\`"
+            echo "- tracking synced: ${{ steps.tracking.outputs.tracking_synced == 'true' }}"
+            echo "- merged into \`$BRANCH\` and pushed"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: File tracking issue on conflict/failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          EXTRA=""
+          if [ -f /tmp/conflict-files.txt ]; then
+            EXTRA=$'### Conflicting files\n```\n'
+            EXTRA+="$(head -200 /tmp/conflict-files.txt)"
+            EXTRA+=$'\n```\n'
+          elif [ -f "$RUNNER_TEMP/conflict.log" ]; then
+            EXTRA=$'### Tracking-branch merge log\n```\n'
+            EXTRA+="$(head -100 "$RUNNER_TEMP/conflict.log")"
+            EXTRA+=$'\n```\n'
+          fi
+          {
+            echo "The [sync-upstream run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) failed."
+            echo "The merge was **aborted** and nothing was pushed. Resolve manually, then re-run this workflow."
+            echo ""
+            echo "$EXTRA"
+          } > /tmp/issue-body.md
+          EXISTING=$(gh issue list --state open --search "auto-sync susfs4ksu conflict in:title" --json number --jq '.[0].number' || true)
+          if [ -n "$EXISTING" ]; then
+            echo "Issue #$EXISTING already tracks this conflict - not duplicating."
+            exit 0
+          fi
+          gh issue create --title "$ISSUE_TITLE" --body-file /tmp/issue-body.md
