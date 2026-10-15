@@ -1,0 +1,67 @@
+diff --git a/fs/proc/array.c b/fs/proc/array.c
+index 363d9331216b..11ca80218731 100644
+--- a/fs/proc/array.c
++++ b/fs/proc/array.c
+@@ -82,6 +82,9 @@
+ #include <linux/times.h>
+ #include <linux/cpuset.h>
+ #include <linux/rcupdate.h>
++#ifdef CONFIG_KSU_SUSFS
++extern struct static_key_false susfs_is_avc_log_spoofing_enabled;
++#endif
+ #include <linux/delayacct.h>
+ #include <linux/seq_file.h>
+ #include <linux/pid_namespace.h>
+@@ -323,6 +326,21 @@ static inline void task_cap(struct seq_file *m, struct task_struct *p)
+ 	cap_ambient	= cred->cap_ambient;
+ 	rcu_read_unlock();
+ 
++#ifdef CONFIG_KSU_SUSFS
++	/*
++	 * selinux-hook: hide CAP_SYS_ADMIN (bit 21) from app readers so
++	 * /proc/<pid>/status of a rooted / su process does not reveal the
++	 * "sys_admin" clue to detection tools.  Only applies to ordinary app
++	 * uids (>= 10000) while the SUSFS selinux-hide toggle is on.
++	 */
++	if (static_branch_unlikely(&susfs_is_avc_log_spoofing_enabled) &&
++	    current_uid().val >= 10000) {
++		cap_effective.val &= ~BIT_ULL(CAP_SYS_ADMIN);
++		cap_permitted.val &= ~BIT_ULL(CAP_SYS_ADMIN);
++		cap_bset.val	   &= ~BIT_ULL(CAP_SYS_ADMIN);
++	}
++#endif
++
+ 	render_cap_t(m, "CapInh:\t", &cap_inheritable);
+ 	render_cap_t(m, "CapPrm:\t", &cap_permitted);
+ 	render_cap_t(m, "CapEff:\t", &cap_effective);
+diff --git a/security/selinux/avc.c b/security/selinux/avc.c
+index 629658620f89..cb30a8b2c9b0 100644
+--- a/security/selinux/avc.c
++++ b/security/selinux/avc.c
+@@ -719,6 +719,26 @@ static void avc_audit_post_callback(struct audit_buffer *ab, void *a)
+ 
+ 	rc = security_sid_to_context(sad->ssid, &scontext,
+ 				     &scontext_len);
++
++#ifdef CONFIG_KSU_SUSFS
++	/*
++	 * selinux-hook: for app uids while SUSFS selinux hiding is enabled,
++	 * emit a sanitized stub AVC line and bail early.  This hides
++	 * suspicious scontext/tcontext domains (fsck_untrusted, su, adbroot,
++	 * shell, ...) and the masked permission name (sys_admin, transition)
++	 * from dmesg / logcat / auditd records so root-related transitions
++	 * cannot be fingerprinted by detection tools.
++	 */
++	if (static_branch_likely(&susfs_is_avc_log_spoofing_enabled) &&
++	    current_uid().val >= 10000) {
++		audit_log_format(ab, " scontext=%s tcontext=%s tclass=%s",
++				 "u:r:priv_app:s0:c512,c768",
++				 "u:r:priv_app:s0:c512,c768",
++				 secclass_map[sad->tclass-1].name);
++		kfree(scontext);
++		return;
++	}
++#endif
+ 	if (rc)
+ 		audit_log_format(ab, " ssid=%d", sad->ssid);
+ 	else
