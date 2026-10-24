@@ -590,7 +590,7 @@ index 7e337abf..8b6e0b3c 100644
      pr_info("handle umount for uid: %d, pid: %d\n", new_uid, current->pid);
  
 diff --git a/kernel/feature/selinux_hide.c b/kernel/feature/selinux_hide.c
-index 459f99f9..6cd0659d 100644
+index 8f23888b..6cd0659d 100644
 --- a/kernel/feature/selinux_hide.c
 +++ b/kernel/feature/selinux_hide.c
 @@ -1,9 +1,5 @@
@@ -759,7 +759,7 @@ index 459f99f9..6cd0659d 100644
  
      fake_status = new_page;
      pr_info("initialize_fake_status initialized: sequence=%d, policyload=%d, enforcing=%d\n", new_status->sequence,
-@@ -361,120 +309,32 @@ out:
+@@ -361,117 +309,32 @@ out:
      mutex_unlock(&selinux_state.status_lock);
  }
  
@@ -769,10 +769,7 @@ index 459f99f9..6cd0659d 100644
 +void ksu_selinux_hide_handle_second_stage()
  {
 -    if (likely(current_uid().val >= 10000 && ksu_selinux_hide_enabled)) {
--        void *data;
--        mutex_lock(&selinux_state.status_lock);
--        data = fake_status;
--        mutex_unlock(&selinux_state.status_lock);
+-        void *data = fake_status;
 -        if (data) {
 -            filp->private_data = data;
 -            return 0;
@@ -893,7 +890,7 @@ index 459f99f9..6cd0659d 100644
  }
  
  static int selinux_hide_feature_get(u64 *value)
-@@ -499,10 +359,11 @@ static int selinux_hide_feature_set(u64 value)
+@@ -496,10 +359,11 @@ static int selinux_hide_feature_set(u64 value)
          }
      } else {
          if (ksu_selinux_hide_running) {
@@ -906,7 +903,7 @@ index 459f99f9..6cd0659d 100644
      mutex_unlock(&selinux_hide_mutex);
      return ret;
  }
-@@ -514,65 +375,18 @@ static const struct ksu_feature_handler selinux_hide_handler = {
+@@ -511,65 +375,18 @@ static const struct ksu_feature_handler selinux_hide_handler = {
      .set_handler = selinux_hide_feature_set,
  };
  
@@ -973,7 +970,7 @@ index 459f99f9..6cd0659d 100644
          ksu_selinux_hide_running = false;
      }
      mutex_unlock(&selinux_hide_mutex);
-@@ -1254,4 +1068,4 @@ out:
+@@ -1251,4 +1068,4 @@ out:
  allow:
      avd->allowed = 0xffffffff;
      goto out;
@@ -1631,6 +1628,28 @@ index be25a826..7f2870a8 100644
  extern struct selinux_policy *backup_sepolicy;
  extern bool ksu_no_custom_rc;
  
+diff --git a/kernel/manager/pkg_observer.c b/kernel/manager/pkg_observer.c
+index dc785e37..0c1f5dba 100644
+--- a/kernel/manager/pkg_observer.c
++++ b/kernel/manager/pkg_observer.c
+@@ -8,6 +8,7 @@
+ #include <linux/rculist.h>
+ #include <linux/task_work.h>
+ #include <linux/version.h>
++#include <linux/susfs.h>
+ #include "klog.h" // IWYU pragma: keep
+ #include "manager/throne_tracker.h"
+ 
+@@ -41,6 +42,9 @@ static void ksu_defer_track_throne(void)
+ {
+     struct callback_head *cb;
+ 
++    // Renew the getpriority uid bitmap filter
++    susfs_parse_priority_app_strings();
++
+     if (!(current->flags & PF_KTHREAD)) {
+         cb = kzalloc(sizeof(*cb), GFP_KERNEL);
+         if (cb) {
 diff --git a/kernel/policy/allowlist.c b/kernel/policy/allowlist.c
 index e5735d67..16a487b8 100644
 --- a/kernel/policy/allowlist.c
@@ -2764,7 +2783,7 @@ index 635ec01c..c7b28b86 100644
  int ksu_sulog_emit_grant_root(int retval, __u32 uid, __u32 euid, gfp_t gfp);
  
 diff --git a/kernel/supercall/dispatch.c b/kernel/supercall/dispatch.c
-index 13c9c590..dd5b26a8 100644
+index 13c9c590..4060bff7 100644
 --- a/kernel/supercall/dispatch.c
 +++ b/kernel/supercall/dispatch.c
 @@ -7,6 +7,8 @@
@@ -2933,7 +2952,7 @@ index 13c9c590..dd5b26a8 100644
      }
      if (copy_to_user(arg, &cmd, sizeof(cmd))) {
          pr_err("manage_mark: copy_to_user failed\n");
-@@ -531,6 +495,87 @@ static int do_manage_mark(void __user *arg)
+@@ -531,6 +495,90 @@ static int do_manage_mark(void __user *arg)
      return 0;
  }
  
@@ -2995,6 +3014,9 @@ index 13c9c590..dd5b26a8 100644
 +                susfs_add_sus_map(arg);
 +                return 0;
 +#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
++            case CMD_SUSFS_SET_PRIORITY_UID_FILTER:
++                susfs_set_priority_uid_filter(arg);
++                return 0;
 +            case CMD_SUSFS_ENABLE_AVC_LOG_SPOOFING:
 +                susfs_set_avc_log_spoofing(arg);
 +                return 0;
